@@ -1,0 +1,33 @@
+clean_build_debug_without_cache {
+    tasks = ["clean", "assembleInternalDebug"]
+    warm-ups = 4
+    gradle-args = ["--no-build-cache"]
+}
+
+clean_build_debug_with_cache {
+    tasks = ["clean", "assembleInternalDebug"]
+    show-build-cache-size = true
+    warm-ups = 4
+}
+
+clean_build_release_no_cache {
+    tasks = ["clean", "bundlePlayRelease"]
+    gradle-args = ["--no-build-cache"]
+    warm-ups = 4
+}
+
+incremental_build_abi_change_to_dao_class {
+    tasks = ["assembleInternalDebug"]
+
+    show-build-cache-size = true
+    apply-abi-change-to = "app/src/main/java/com/duckduckgo/app/bookmarks/db/BookmarksDao.kt"
+    warm-ups = 4
+}
+
+incremental_build_abi_change_to_random_class {
+    tasks = ["assembleInternalDebug"]
+
+    show-build-cache-size = true
+    apply-abi-change-to = "app/src/main/java/com/duckduckgo/app/about/AboutDuckDuckGoActivity.kt"
+    warm-ups = 4
+}
