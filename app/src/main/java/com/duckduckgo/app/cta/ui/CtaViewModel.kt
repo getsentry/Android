@@ -24,9 +24,6 @@ import com.duckduckgo.app.cta.model.CtaId
 import com.duckduckgo.app.cta.model.DismissedCta
 import com.duckduckgo.app.cta.ui.HomePanelCta.*
 import com.duckduckgo.app.global.DispatcherProvider
-import com.duckduckgo.app.global.events.db.FavoritesOnboardingObserver
-import com.duckduckgo.app.global.events.db.UserEventKey
-import com.duckduckgo.app.global.events.db.UserEventsRepository
 import com.duckduckgo.app.global.install.AppInstallStore
 import com.duckduckgo.app.global.install.daysInstalled
 import com.duckduckgo.app.global.model.Site
@@ -36,8 +33,6 @@ import com.duckduckgo.app.onboarding.store.*
 import com.duckduckgo.app.pixels.AppPixelName
 import com.duckduckgo.app.privacy.db.UserWhitelistDao
 import com.duckduckgo.app.settings.db.SettingsDataStore
-import com.duckduckgo.app.statistics.VariantManager
-import com.duckduckgo.app.statistics.favoritesOnboardingEnabled
 import com.duckduckgo.app.statistics.pixels.Pixel
 import com.duckduckgo.app.survey.db.SurveyDao
 import com.duckduckgo.app.survey.model.Survey
@@ -65,11 +60,8 @@ class CtaViewModel @Inject constructor(
     private val settingsDataStore: SettingsDataStore,
     private val onboardingStore: OnboardingStore,
     private val userStageStore: UserStageStore,
-    private val userEventsRepository: UserEventsRepository,
     private val tabRepository: TabRepository,
-    private val favoritesOnboardingObserver: FavoritesOnboardingObserver,
-    private val dispatchers: DispatcherProvider,
-    private val variantManager: VariantManager
+    private val dispatchers: DispatcherProvider
 ) {
     val surveyLiveData: LiveData<Survey> = surveyDao.getLiveScheduled()
 
@@ -204,9 +196,6 @@ class CtaViewModel @Inject constructor(
             canShowDaxIntroCta() -> {
                 DaxBubbleCta.DaxIntroCta(onboardingStore, appInstallStore)
             }
-            canShowDaxFavoritesOnboarding() -> {
-                DaxBubbleCta.DaxFavoritesCTA(favoritesOnboardingObserver, onboardingStore, appInstallStore)
-            }
             canShowDaxCtaEndOfJourney() -> {
                 DaxBubbleCta.DaxEndCta(onboardingStore, appInstallStore)
             }
@@ -229,17 +218,17 @@ class CtaViewModel @Inject constructor(
     private fun surveyCta(locale: Locale): HomePanelCta.Survey? {
         val survey = activeSurvey
 
-        if (survey == null || survey.url == null) {
+        if (survey?.url == null) {
             return null
         }
 
-        if (locale != Locale.US) {
+        if (!ALLOWED_LOCALES.contains(locale)) {
             return null
         }
 
         val showOnDay = survey.daysInstalled?.toLong()
         val daysInstalled = appInstallStore.daysInstalled()
-        if ((showOnDay == null && daysInstalled >= SURVEY_DEFAULT_MIN_DAYS_INSTALLED) || showOnDay == daysInstalled) {
+        if ((showOnDay == null && daysInstalled >= SURVEY_DEFAULT_MIN_DAYS_INSTALLED) || showOnDay == daysInstalled || showOnDay == SURVEY_NO_MIN_DAYS_INSTALLED_REQUIRED) {
             return Survey(survey)
         }
         return null
@@ -254,14 +243,6 @@ class CtaViewModel @Inject constructor(
 
     @WorkerThread
     private suspend fun canShowDaxIntroCta(): Boolean = daxOnboardingActive() && !daxDialogIntroShown() && !settingsDataStore.hideTips
-
-    @WorkerThread
-    private suspend fun canShowDaxFavoritesOnboarding(): Boolean = daxOnboardingActive() &&
-        !daxDialogEndShown() &&
-        daxDialogIntroShown() &&
-        !settingsDataStore.hideTips &&
-        userEventsRepository.getUserEvent(UserEventKey.FIRST_NON_SERP_VISITED_SITE)?.payload?.isNotEmpty() == true &&
-        variantManager.favoritesOnboardingEnabled()
 
     @WorkerThread
     private suspend fun canShowDaxCtaEndOfJourney(): Boolean = daxOnboardingActive() &&
@@ -378,6 +359,8 @@ class CtaViewModel @Inject constructor(
 
     companion object {
         private const val SURVEY_DEFAULT_MIN_DAYS_INSTALLED = 30
+        private const val SURVEY_NO_MIN_DAYS_INSTALLED_REQUIRED = -1L
         private const val MAX_TABS_OPEN_FIRE_EDUCATION = 2
+        private val ALLOWED_LOCALES = listOf(Locale.US, Locale.UK, Locale.CANADA)
     }
 }

@@ -15,13 +15,6 @@
   -->
 
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-    <!-- Favorite Onboarding Experiment-->
-    <string name="daxFavoritesClearCtaText"><![CDATA[Nice work. Your data is toast!<br/><br/>☝️ Use the icons above to visit your favorite sites in a flash. Try adding a favorite now.]]></string>
-    <string name="daxFavoritesNewTabCtaText"><![CDATA[You\'ve got this!<br/><br/>☝️ Use the icons above to visit your favorite sites in a flash. Try adding a favorite now.]]></string>
-    <string name="daxFavoritesCtaAddFavorite">Add Favorite</string>
-    <string name="favoriteAddedOnboardingText"><![CDATA[We added your first favorite. <u><a href="">Undo</a><u/>]]></string>
-    <string name="addFavoriteHint">Visit the site you\'d like to add as a favorite.</string>
-
     <!-- Favorites widget -->
     <string name="addFavoriteMenuTitleHighlighted">👋 Add Favorite</string>
     <string name="widgetConfigurationTitleText">Choose Theme</string>
@@ -40,4 +33,49 @@
     <!-- Email -->
     <string name="emailNotSupported">Device not supported</string>
     <string name="emailNotSupportedExplanation">Email Protection allows you to create private email addresses that remove email trackers. We need to encrypt and store these addresses you create locally on your device. Because your device does not support encrypted storage, Email Protection is unavailable.</string>
+
+    <!-- Settings Activity -->
+    <string name="settingsLightTheme">Light</string>
+    <string name="settingsTheme">Theme</string>
+    <string name="settingsDarkTheme">Dark</string>
+    <string name="settingsSystemTheme">System Default</string>
+
+    <!-- Theme Settings -->
+    <string name="settingsThemeDialogSave">Set Theme</string>
+
+    <!-- App links -->
+    <string name="appLinkSnackBarAction">Open in app</string>
+    <string name="appLinkMultipleSnackBarAction">Choose app</string>
+    <string name="appLinkSnackBarMessage">You can open this link in %s.</string>
+    <string name="appLinkMultipleSnackBarMessage">You can open this link in other apps.</string>
+    <string name="appLinkIntentChooserTitle">Open with</string>
+    <string name="appLinkMenuItemTitle">Open in App</string>
+
+    <!-- App Links Settings -->
+    <string name="settingsTitleAppLinks">Open Links in Apps</string>
+    <string name="settingsTitleAppLinksDialog">Open links in apps</string>
+    <string name="settingsAppLinksAskEveryTime">Ask every time</string>
+    <string name="settingsAppLinksAlways">Always</string>
+    <string name="settingsAppLinksNever">Never</string>
+
+    <!-- Bookmark folders -->
+    <string name="bookmarkDialogTitleEdit">Edit Bookmark</string>
+    <string name="favoriteDialogTitleEdit">Edit Favorite</string>
+    <string name="locationLabel">Location</string>
+    <string name="folderLocationTitle">Select Location</string>
+    <string name="addFolder">Add Folder</string>
+    <string name="editFolder">Edit Folder</string>
+    <string name="bookmarkFolderDeleteDialogMessage">"Are you sure you want to delete "</string>
+    <string name="bookmarkFolderEmpty">Empty</string>
+
+    <plurals name="bookmarkFolderDeleteDialogMessage">
+        <item quantity="one">%s%s and %d item?</item>
+        <item quantity="other">%s%s and %d items?</item>
+    </plurals>
+
+    <plurals name="bookmarkFolderItems">
+        <item quantity="one">%d item</item>
+        <item quantity="other">%d items</item>
+    </plurals>
+
 </resources>

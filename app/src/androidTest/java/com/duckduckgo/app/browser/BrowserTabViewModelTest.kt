@@ -19,7 +19,6 @@ package com.duckduckgo.app.browser
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.util.Log
 import android.view.MenuItem
 import android.view.View
 import android.webkit.GeolocationPermissions
@@ -30,10 +29,6 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.Observer
 import androidx.room.Room
 import androidx.test.platform.app.InstrumentationRegistry.getInstrumentation
-import androidx.work.Configuration
-import androidx.work.WorkManager
-import androidx.work.impl.utils.SynchronousExecutor
-import androidx.work.testing.WorkManagerTestInitHelper
 import com.duckduckgo.app.CoroutineTestRule
 import com.duckduckgo.app.InstantSchedulersRule
 import com.duckduckgo.app.ValueCaptorObserver
@@ -42,10 +37,10 @@ import com.duckduckgo.app.autocomplete.api.AutoComplete.AutoCompleteSuggestion.A
 import com.duckduckgo.app.autocomplete.api.AutoComplete.AutoCompleteSuggestion.AutoCompleteSearchSuggestion
 import com.duckduckgo.app.autocomplete.api.AutoCompleteApi
 import com.duckduckgo.app.autocomplete.api.AutoCompleteService
-import com.duckduckgo.app.bookmarks.db.BookmarkEntity
 import com.duckduckgo.app.bookmarks.db.BookmarksDao
+import com.duckduckgo.app.bookmarks.model.BookmarksRepository
 import com.duckduckgo.app.bookmarks.model.FavoritesRepository
-import com.duckduckgo.app.bookmarks.model.SavedSite
+import com.duckduckgo.app.bookmarks.model.SavedSite.Bookmark
 import com.duckduckgo.app.bookmarks.model.SavedSite.Favorite
 import com.duckduckgo.app.browser.BrowserTabViewModel.Command
 import com.duckduckgo.app.browser.BrowserTabViewModel.Command.Navigate
@@ -81,16 +76,10 @@ import com.duckduckgo.app.fire.fireproofwebsite.data.FireproofWebsiteDao
 import com.duckduckgo.app.fire.fireproofwebsite.data.FireproofWebsiteEntity
 import com.duckduckgo.app.fire.fireproofwebsite.data.FireproofWebsiteRepository
 import com.duckduckgo.app.global.db.AppDatabase
-import com.duckduckgo.app.global.events.db.FavoritesOnboardingObserver
-import com.duckduckgo.app.global.events.db.FavoritesOnboardingWorkRequestBuilder
-import com.duckduckgo.app.global.events.db.UserEventsRepository
 import com.duckduckgo.app.global.events.db.UserEventsStore
 import com.duckduckgo.app.global.install.AppInstallStore
 import com.duckduckgo.app.global.model.Site
 import com.duckduckgo.app.global.model.SiteFactory
-import com.duckduckgo.app.globalprivacycontrol.GlobalPrivacyControlManager
-import com.duckduckgo.app.globalprivacycontrol.GlobalPrivacyControlManager.Companion.GPC_HEADER
-import com.duckduckgo.app.globalprivacycontrol.GlobalPrivacyControlManager.Companion.GPC_HEADER_VALUE
 import com.duckduckgo.app.location.GeoLocationPermissions
 import com.duckduckgo.app.location.data.LocationPermissionEntity
 import com.duckduckgo.app.location.data.LocationPermissionType
@@ -117,10 +106,18 @@ import com.duckduckgo.app.survey.model.Survey
 import com.duckduckgo.app.tabs.model.TabEntity
 import com.duckduckgo.app.tabs.model.TabRepository
 import com.duckduckgo.app.trackerdetection.EntityLookup
-import com.duckduckgo.app.trackerdetection.db.TemporaryTrackingWhitelistDao
 import com.duckduckgo.app.trackerdetection.model.TrackingEvent
 import com.duckduckgo.app.usage.search.SearchCountDao
 import com.duckduckgo.app.widget.ui.WidgetCapabilities
+import com.duckduckgo.feature.toggles.api.FeatureToggle
+import com.duckduckgo.privacy.config.api.ContentBlocking
+import com.duckduckgo.privacy.config.api.GpcException
+import com.duckduckgo.privacy.config.api.PrivacyFeatureName
+import com.duckduckgo.privacy.config.impl.features.gpc.RealGpc
+import com.duckduckgo.privacy.config.impl.features.gpc.RealGpc.Companion.GPC_HEADER
+import com.duckduckgo.privacy.config.impl.features.gpc.RealGpc.Companion.GPC_HEADER_VALUE
+import com.duckduckgo.privacy.config.impl.features.unprotectedtemporary.UnprotectedTemporary
+import com.duckduckgo.privacy.config.store.features.gpc.GpcRepository
 import com.nhaarman.mockitokotlin2.*
 import com.nhaarman.mockitokotlin2.any
 import com.nhaarman.mockitokotlin2.atLeastOnce
@@ -129,7 +126,6 @@ import com.nhaarman.mockitokotlin2.eq
 import com.nhaarman.mockitokotlin2.whenever
 import dagger.Lazy
 import io.reactivex.Observable
-import io.reactivex.Single
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.channels.Channel
@@ -159,6 +155,7 @@ import org.mockito.MockitoAnnotations
 import org.mockito.internal.util.DefaultMockingDetails
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
 @FlowPreview
@@ -195,6 +192,9 @@ class BrowserTabViewModelTest {
 
     @Mock
     private lateinit var mockBookmarksDao: BookmarksDao
+
+    @Mock
+    private lateinit var mockBookmarksRepository: BookmarksRepository
 
     @Mock
     private lateinit var mockLongPressHandler: LongPressHandler
@@ -245,7 +245,7 @@ class BrowserTabViewModelTest {
     private lateinit var mockUserWhitelistDao: UserWhitelistDao
 
     @Mock
-    private lateinit var mockTemporaryTrackingWhitelistDao: TemporaryTrackingWhitelistDao
+    private lateinit var mockContentBlocking: ContentBlocking
 
     @Mock
     private lateinit var mockNavigationAwareLoginDetector: NavigationAwareLoginDetector
@@ -275,10 +275,16 @@ class BrowserTabViewModelTest {
     private lateinit var mockAppLinksHandler: AppLinksHandler
 
     @Mock
-    private lateinit var mockUserEventsRepository: UserEventsRepository
+    private lateinit var mockVariantManager: VariantManager
 
     @Mock
-    private lateinit var mockVariantManager: VariantManager
+    private lateinit var mockFeatureToggle: FeatureToggle
+
+    @Mock
+    private lateinit var mockGpcRepository: GpcRepository
+
+    @Mock
+    private lateinit var mockUnprotectedTemporary: UnprotectedTemporary
 
     private val lazyFaviconManager = Lazy { mockFaviconManager }
 
@@ -300,8 +306,6 @@ class BrowserTabViewModelTest {
 
     private lateinit var locationPermissionsDao: LocationPermissionsDao
 
-    private lateinit var favoritesOnboardingObserver: FavoritesOnboardingObserver
-
     private val context = getInstrumentation().targetContext
 
     private val selectedTabLiveData = MutableLiveData<TabEntity>()
@@ -318,15 +322,9 @@ class BrowserTabViewModelTest {
 
     private val emailStateFlow = MutableStateFlow(false)
 
-    private val workManager: WorkManager by lazy {
-        val config = Configuration.Builder()
-            .setMinimumLoggingLevel(Log.DEBUG)
-            .setExecutor(SynchronousExecutor())
-            .build()
+    private val bookmarksListFlow = Channel<List<Bookmark>>()
 
-        WorkManagerTestInitHelper.initializeTestWorkManager(context, config)
-        return@lazy WorkManager.getInstance(context)
-    }
+    private val favoriteListFlow = Channel<List<Favorite>>()
 
     @Before
     fun before() {
@@ -343,18 +341,8 @@ class BrowserTabViewModelTest {
         whenever(mockDismissedCtaDao.dismissedCtas()).thenReturn(dismissedCtaDaoChannel.consumeAsFlow())
         whenever(mockTabRepository.flowTabs).thenReturn(flowOf(emptyList()))
         whenever(mockEmailManager.signedInFlow()).thenReturn(emailStateFlow.asStateFlow())
-        whenever(mockFavoritesRepository.favorites()).thenReturn(flowOf())
-        givenDefaultOnboarding()
-
-        val onboardingWorker = FavoritesOnboardingWorkRequestBuilder(workManager, mockVariantManager)
-
-        favoritesOnboardingObserver = FavoritesOnboardingObserver(
-            appCoroutineScope = TestCoroutineScope(),
-            userEventsRepository = mockUserEventsRepository,
-            userStageStore = mockUserStageStore,
-            favoritesOnboardingWorkRequestBuilder = onboardingWorker,
-            variantManager = mockVariantManager
-        )
+        whenever(mockFavoritesRepository.favorites()).thenReturn(favoriteListFlow.consumeAsFlow())
+        whenever(mockBookmarksRepository.bookmarks()).thenReturn(bookmarksListFlow.consumeAsFlow())
 
         ctaViewModel = CtaViewModel(
             appInstallStore = mockAppInstallStore,
@@ -367,10 +355,7 @@ class BrowserTabViewModelTest {
             onboardingStore = mockOnboardingStore,
             userStageStore = mockUserStageStore,
             tabRepository = mockTabRepository,
-            favoritesOnboardingObserver = favoritesOnboardingObserver,
-            dispatchers = coroutineRule.testDispatcherProvider,
-            variantManager = mockVariantManager,
-            userEventsRepository = mockUserEventsRepository
+            dispatchers = coroutineRule.testDispatcherProvider
         )
 
         val siteFactory = SiteFactory(mockPrivacyPractices, mockEntityLookup)
@@ -383,7 +368,7 @@ class BrowserTabViewModelTest {
         whenever(mockPrivacyPractices.privacyPracticesFor(any())).thenReturn(PrivacyPractices.UNKNOWN)
         whenever(mockAppInstallStore.installTimestamp).thenReturn(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(1))
         whenever(mockUserWhitelistDao.contains(anyString())).thenReturn(false)
-        whenever(mockTemporaryTrackingWhitelistDao.contains(anyString())).thenReturn(false)
+        whenever(mockContentBlocking.isAnException(anyString())).thenReturn(false)
         whenever(fireproofDialogsEventHandler.event).thenReturn(fireproofDialogsEventHandlerLiveData)
 
         testee = BrowserTabViewModel(
@@ -396,7 +381,7 @@ class BrowserTabViewModelTest {
             networkLeaderboardDao = mockNetworkLeaderboardDao,
             autoComplete = mockAutoCompleteApi,
             appSettingsPreferencesStore = mockSettingsStore,
-            bookmarksDao = mockBookmarksDao,
+            bookmarksRepository = mockBookmarksRepository,
             longPressHandler = mockLongPressHandler,
             webViewSessionStorage = webViewSessionStorage,
             specialUrlDetector = mockSpecialUrlDetector,
@@ -416,15 +401,13 @@ class BrowserTabViewModelTest {
             navigationAwareLoginDetector = mockNavigationAwareLoginDetector,
             userEventsStore = mockUserEventsStore,
             fileDownloader = mockFileDownloader,
-            globalPrivacyControl = GlobalPrivacyControlManager(mockSettingsStore),
+            gpc = RealGpc(context, mockFeatureToggle, mockGpcRepository, mockUnprotectedTemporary),
             fireproofDialogsEventHandler = fireproofDialogsEventHandler,
             emailManager = mockEmailManager,
             favoritesRepository = mockFavoritesRepository,
             appCoroutineScope = TestCoroutineScope(),
             appLinksHandler = mockAppLinksHandler,
-            temporaryTrackingWhitelistDao = mockTemporaryTrackingWhitelistDao,
-            variantManager = mockVariantManager,
-            userEventsRepository = mockUserEventsRepository
+            contentBlocking = mockContentBlocking
         )
 
         testee.loadData("abc", null, false, false)
@@ -436,6 +419,8 @@ class BrowserTabViewModelTest {
     fun after() {
         ctaViewModel.isFireButtonPulseAnimationFlowEnabled.close()
         dismissedCtaDaoChannel.close()
+        bookmarksListFlow.close()
+        favoriteListFlow.close()
         testee.onCleared()
         db.close()
         testee.command.removeObserver(mockCommandObserver)
@@ -567,9 +552,10 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenBookmarkEditedThenDaoIsUpdated() = coroutineRule.runBlocking {
-        testee.onSavedSiteEdited(SavedSite.Bookmark(0, "A title", "www.example.com"))
-        verify(mockBookmarksDao).update(BookmarkEntity(title = "A title", url = "www.example.com"))
+    fun whenBookmarkEditedThenRepositoryIsUpdated() = coroutineRule.runBlocking {
+        val bookmark = Bookmark(id = 0, title = "A title", url = "www.example.com", parentId = 0)
+        testee.onSavedSiteEdited(bookmark)
+        verify(mockBookmarksRepository).update(bookmark)
     }
 
     @Test
@@ -580,11 +566,15 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenBookmarkAddedThenDaoIsUpdatedAndUserNotified() = coroutineRule.runBlocking {
-        loadUrl("www.example.com", "A title")
+    fun whenBookmarkAddedThenRepositoryIsUpdatedAndUserNotified() = coroutineRule.runBlocking {
+        val url = "http://www.example.com"
+        val title = "A title"
+        val bookmark = Bookmark(id = 0, title = title, url = url, parentId = 0)
+        whenever(mockBookmarksRepository.insert(title = anyString(), url = anyString(), parentId = anyLong())).thenReturn(bookmark)
+        loadUrl(url = url, title = title)
 
-        testee.onBookmarkAddRequested()
-        verify(mockBookmarksDao).insert(BookmarkEntity(title = "A title", url = "www.example.com"))
+        testee.onBookmarkMenuClicked()
+        verify(mockBookmarksRepository).insert(title = title, url = url)
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
         assertTrue(commandCaptor.lastValue is Command.ShowSavedSiteAddedConfirmation)
     }
@@ -595,7 +585,7 @@ class BrowserTabViewModelTest {
         loadUrl("www.example.com", "A title")
         whenever(mockFavoritesRepository.insert(any(), any())).thenReturn(savedSite)
 
-        testee.onAddFavoriteMenuClicked()
+        testee.onFavoriteMenuClicked()
 
         verify(mockFavoritesRepository).insert(title = "A title", url = "www.example.com")
         assertCommandIssued<Command.ShowSavedSiteAddedConfirmation>()
@@ -604,29 +594,9 @@ class BrowserTabViewModelTest {
     @Test
     fun whenNoSiteAndUserSelectsToAddFavoriteThenSiteIsNotAdded() = coroutineRule.runBlocking {
 
-        testee.onAddFavoriteMenuClicked()
+        testee.onFavoriteMenuClicked()
 
         verify(mockFavoritesRepository, times(0)).insert(any(), any())
-    }
-
-    @Test
-    fun whenUserClicksOnAddFavoriteItemThenPixelSent() = coroutineRule.runBlocking {
-        givenFavoritesOnboarindExpEnabled()
-
-        testee.onAddFavoriteItemClicked()
-
-        verify(mockPixel).fire(AppPixelName.FAVORITE_HOMETAB_ADD_ITEM_PRESSED)
-    }
-
-    @Test
-    fun whenUserClicksOnAddFavoriteItemAndDaxFavoriteCtaPresentThenCtaDismissed() = coroutineRule.runBlocking {
-        givenFavoritesOnboarindExpEnabled()
-        val cta = DaxBubbleCta.DaxFavoritesCTA(favoritesOnboardingObserver, mockOnboardingStore, mockAppInstallStore)
-        testee.ctaViewState.value = BrowserTabViewModel.CtaViewState(cta = cta)
-
-        testee.onAddFavoriteItemClicked()
-
-        assertNull(testee.ctaViewState.value!!.cta)
     }
 
     @Test
@@ -806,29 +776,6 @@ class BrowserTabViewModelTest {
         overrideUrl("http://example.com")
 
         verify(mockNavigationAwareLoginDetector).onEvent(NavigationEvent.Redirect("http://example.com"))
-    }
-
-    @Test
-    fun whenPageFinishesThenNotifyUserEventsSiteVisited() = coroutineRule.runBlocking {
-        givenFavoritesOnboarindExpEnabled()
-        loadUrl("http://duckduckgo.com")
-
-        testee.progressChanged(100)
-
-        advanceUntilIdle()
-        verify(mockUserEventsRepository).siteVisited(any(), eq("http://duckduckgo.com"), any())
-    }
-
-    @Test
-    fun whenUserClicksOnAddFavoriteItemAndPageFinishesThenStoreSite() = coroutineRule.runBlocking {
-        givenFavoritesOnboarindExpEnabled()
-        testee.onAddFavoriteItemClicked()
-        loadUrl("http://duckduckgo.com")
-
-        testee.progressChanged(100)
-
-        advanceUntilIdle()
-        verify(mockFavoritesRepository).insert(any(), eq("http://duckduckgo.com"))
     }
 
     @Test
@@ -1148,7 +1095,6 @@ class BrowserTabViewModelTest {
 
     @Test
     fun whenEnteringQueryWithAutoCompleteEnabledThenAutoCompleteSuggestionsShown() {
-        whenever(mockBookmarksDao.bookmarksObservable()).thenReturn(Single.just(emptyList()))
         whenever(mockAutoCompleteService.autoComplete("foo")).thenReturn(Observable.just(emptyList()))
         doReturn(true).whenever(mockSettingsStore).autoCompleteSuggestionsEnabled
         testee.onOmnibarInputStateChanged("foo", true, hasQueryChanged = true)
@@ -1207,11 +1153,24 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenEnteringAppLinkQueryThenNavigateInBrowser() {
+    fun whenEnteringAppLinkQueryAndShouldShowAppLinksPromptThenNavigateInBrowserAndSetPreviousUrlToNull() {
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(true)
         whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
         testee.onUserSubmittedQuery("foo")
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
         assertTrue(commandCaptor.allValues.any { it == Command.HideKeyboard })
+        verify(mockAppLinksHandler).updatePreviousUrl(null)
+    }
+
+    @Test
+    fun whenEnteringAppLinkQueryAndShouldNotShowAppLinksPromptThenNavigateInBrowserAndSetUserQueryState() {
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(false)
+        whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
+        testee.onUserSubmittedQuery("foo")
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+        assertTrue(commandCaptor.allValues.any { it == Command.HideKeyboard })
+        verify(mockAppLinksHandler).updatePreviousUrl("foo.com")
+        verify(mockAppLinksHandler).setUserQueryState(true)
     }
 
     @Test
@@ -1551,21 +1510,26 @@ class BrowserTabViewModelTest {
 
     @Test
     fun whenSiteLoadedAndUserSelectsToAddBookmarkThenAddBookmarkCommandSentWithUrlAndTitle() = coroutineRule.runBlocking {
-        loadUrl("foo.com")
-        testee.titleReceived("Foo Title")
-        testee.onBookmarkAddRequested()
+        val url = "http://foo.com"
+        val title = "Foo Title"
+        val bookmark = Bookmark(id = 0, title = title, url = url, parentId = 0)
+        whenever(mockBookmarksRepository.insert(title = anyString(), url = anyString(), parentId = anyLong())).thenReturn(bookmark)
+        loadUrl(url = url)
+        testee.titleReceived(newTitle = title)
+        testee.onBookmarkMenuClicked()
         val command = captureCommands().value as Command.ShowSavedSiteAddedConfirmation
-        assertEquals("foo.com", command.savedSite.url)
-        assertEquals("Foo Title", command.savedSite.title)
+        assertEquals(url, command.savedSite.url)
+        assertEquals(title, command.savedSite.title)
     }
 
     @Test
     fun whenNoSiteAndUserSelectsToAddBookmarkThenBookmarkIsNotAdded() = coroutineRule.runBlocking {
-        whenever(mockBookmarksDao.insert(any())).thenReturn(1)
+        val bookmark = Bookmark(id = 0, title = "A title", url = "www.example.com", parentId = 0)
+        whenever(mockBookmarksRepository.insert(anyString(), anyString(), anyLong())).thenReturn(bookmark)
 
-        testee.onBookmarkAddRequested()
+        testee.onBookmarkMenuClicked()
 
-        verify(mockBookmarksDao, times(0)).insert(any<BookmarkEntity>())
+        verify(mockBookmarksRepository, times(0)).insert(bookmark)
     }
 
     @Test
@@ -1859,7 +1823,7 @@ class BrowserTabViewModelTest {
 
     @Test
     fun whenBookmarkSuggestionSubmittedThenAutoCompleteBookmarkSelectionPixelSent() = runBlocking {
-        whenever(mockBookmarksDao.hasBookmarks()).thenReturn(true)
+        whenever(mockBookmarksRepository.hasBookmarks()).thenReturn(true)
         val suggestion = AutoCompleteBookmarkSuggestion("example", "Example", "https://example.com")
         testee.autoCompleteViewState.value = autoCompleteViewState().copy(searchResults = AutoCompleteResult("", listOf(suggestion)))
         testee.fireAutocompletePixel(suggestion)
@@ -1868,7 +1832,7 @@ class BrowserTabViewModelTest {
 
     @Test
     fun whenSearchSuggestionSubmittedWithBookmarksThenAutoCompleteSearchSelectionPixelSent() = runBlocking {
-        whenever(mockBookmarksDao.hasBookmarks()).thenReturn(true)
+        whenever(mockBookmarksRepository.hasBookmarks()).thenReturn(true)
         val suggestions = listOf(AutoCompleteSearchSuggestion("", false), AutoCompleteBookmarkSuggestion("", "", ""))
         testee.autoCompleteViewState.value = autoCompleteViewState().copy(searchResults = AutoCompleteResult("", suggestions))
         testee.fireAutocompletePixel(AutoCompleteSearchSuggestion("example", false))
@@ -1878,7 +1842,7 @@ class BrowserTabViewModelTest {
 
     @Test
     fun whenSearchSuggestionSubmittedWithoutBookmarksThenAutoCompleteSearchSelectionPixelSent() = runBlocking {
-        whenever(mockBookmarksDao.hasBookmarks()).thenReturn(false)
+        whenever(mockBookmarksRepository.hasBookmarks()).thenReturn(false)
         testee.autoCompleteViewState.value = autoCompleteViewState().copy(searchResults = AutoCompleteResult("", emptyList()))
         testee.fireAutocompletePixel(AutoCompleteSearchSuggestion("example", false))
 
@@ -2041,17 +2005,6 @@ class BrowserTabViewModelTest {
 
         testee.onCtaShown()
         verify(mockPixel).fire(cta.shownPixel!!, cta.pixelShownParameters())
-    }
-
-    @Test
-    fun whenCtaShownIfDaxFavoritesCtaThenMoveVisitedSitesToFavorites() = coroutineRule.runBlocking {
-        givenFavoritesOnboarindExpEnabled()
-        val cta = DaxBubbleCta.DaxFavoritesCTA(favoritesOnboardingObserver, mockOnboardingStore, mockAppInstallStore)
-        testee.ctaViewState.value = BrowserTabViewModel.CtaViewState(cta = cta)
-
-        testee.onCtaShown()
-
-        verify(mockUserEventsRepository).moveVisitedSiteAsFavorite()
     }
 
     @Test
@@ -2994,7 +2947,6 @@ class BrowserTabViewModelTest {
     @Test
     fun whenUrlIconReceivedFromPreviousUrlThenDontUpdateTabFavicon() = coroutineRule.runBlocking {
         givenOneActiveTabSelected()
-        val bitmap: Bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.RGB_565)
         val file = File("test")
         whenever(mockFaviconManager.storeFavicon(any(), any())).thenReturn(file)
 
@@ -3038,9 +2990,12 @@ class BrowserTabViewModelTest {
     @Test
     fun whenBookmarkAddedThenPersistFavicon() = coroutineRule.runBlocking {
         val url = "http://example.com"
-        loadUrl(url, "A title")
+        val title = "A title"
+        val bookmark = Bookmark(id = 0, title = title, url = url, parentId = 0)
+        whenever(mockBookmarksRepository.insert(title = anyString(), url = anyString(), parentId = anyLong())).thenReturn(bookmark)
+        loadUrl(url = url, title = title)
 
-        testee.onBookmarkAddRequested()
+        testee.onBookmarkMenuClicked()
 
         verify(mockFaviconManager).persistCachedFavicon(any(), eq(url))
     }
@@ -3049,7 +3004,7 @@ class BrowserTabViewModelTest {
     fun whenBookmarkAddedButUrlIsNullThenDoNotPersistFavicon() = coroutineRule.runBlocking {
         loadUrl(null, "A title")
 
-        testee.onBookmarkAddRequested()
+        testee.onBookmarkMenuClicked()
 
         verify(mockFaviconManager, never()).persistCachedFavicon(any(), any())
     }
@@ -3098,21 +3053,34 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenUserSubmittedQueryIfGpcIsEnabledThenAddHeaderToUrl() {
+    fun whenUserSubmittedQueryIfGpcIsEnabledAndUrlIsValidThenAddHeaderToUrl() {
+        givenUrlCanUseGpc()
         whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(true)
 
         testee.onUserSubmittedQuery("foo")
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
 
         val command = commandCaptor.lastValue as Navigate
         assertEquals(GPC_HEADER_VALUE, command.headers[GPC_HEADER])
+    }
+
+    @Test
+    fun whenUserSubmittedQueryIfGpcIsEnabledAndUrlIsNotValidThenDoNotAddHeaderToUrl() {
+        val url = "foo.com"
+        givenUrlCannotUseGpc(url)
+        whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn(url)
+
+        testee.onUserSubmittedQuery("foo")
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+
+        val command = commandCaptor.lastValue as Navigate
+        assertTrue(command.headers.isEmpty())
     }
 
     @Test
     fun whenUserSubmittedQueryIfGpcIsDisabledThenDoNotAddHeaderToUrl() {
+        givenGpcIsDisabled()
         whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(false)
 
         testee.onUserSubmittedQuery("foo")
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
@@ -3122,8 +3090,8 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenOnDesktopSiteModeToggledIfGpcIsEnabledThenAddHeaderToUrl() {
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(true)
+    fun whenOnDesktopSiteModeToggledIfGpcIsEnabledAndUrlIsValidThenAddHeaderToUrl() {
+        givenUrlCanUseGpc()
         loadUrl("http://m.example.com")
 
         testee.onDesktopSiteModeToggled(true)
@@ -3134,8 +3102,8 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenOnDesktopSiteModeToggledIfGpcIsDisabledThenDoNotAddHeaderToUrl() {
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(false)
+    fun whenOnDesktopSiteModeToggledIfGpcIsEnabledAndUrlIsNotValidThenDoNotAddHeaderToUrl() {
+        givenUrlCannotUseGpc("example.com")
         loadUrl("http://m.example.com")
 
         testee.onDesktopSiteModeToggled(true)
@@ -3146,9 +3114,21 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenExternalAppLinkClickedIfGpcIsEnabledThenAddHeaderToUrl() {
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(true)
-        val intentType = SpecialUrlDetector.UrlType.NonHttpAppLink("query", mock(), null)
+    fun whenOnDesktopSiteModeToggledIfGpcIsDisabledThenDoNotAddHeaderToUrl() {
+        givenGpcIsDisabled()
+        loadUrl("http://m.example.com")
+
+        testee.onDesktopSiteModeToggled(true)
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+
+        val command = commandCaptor.lastValue as Navigate
+        assertTrue(command.headers.isEmpty())
+    }
+
+    @Test
+    fun whenExternalAppLinkClickedIfGpcIsEnabledAndUrlIsValidThenAddHeaderToUrl() {
+        givenUrlCanUseGpc()
+        val intentType = SpecialUrlDetector.UrlType.NonHttpAppLink("query", mock(), "fallback")
 
         testee.nonHttpAppLinkClicked(intentType)
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
@@ -3158,9 +3138,34 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenExternalAppLinkClickedIfGpcIsDisabledThenDoNotAddHeaderToUrl() {
-        whenever(mockSettingsStore.globalPrivacyControlEnabled).thenReturn(false)
+    fun whenExternalAppLinkClickedIfGpcIsEnabledAndFallbackUrlIsNullThenDoNotAddHeaderToUrl() {
+        givenUrlCanUseGpc()
         val intentType = SpecialUrlDetector.UrlType.NonHttpAppLink("query", mock(), null)
+
+        testee.nonHttpAppLinkClicked(intentType)
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+
+        val command = commandCaptor.lastValue as Command.HandleNonHttpAppLink
+        assertTrue(command.headers.isEmpty())
+    }
+
+    @Test
+    fun whenExternalAppLinkClickedIfGpcIsEnabledAndUrlIsNotValidThenDoNotAddHeaderToUrl() {
+        val url = "fallback"
+        givenUrlCannotUseGpc(url)
+        val intentType = SpecialUrlDetector.UrlType.NonHttpAppLink("query", mock(), url)
+
+        testee.nonHttpAppLinkClicked(intentType)
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+
+        val command = commandCaptor.lastValue as Command.HandleNonHttpAppLink
+        assertTrue(command.headers.isEmpty())
+    }
+
+    @Test
+    fun whenExternalAppLinkClickedIfGpcIsDisabledThenDoNotAddHeaderToUrl() {
+        givenGpcIsDisabled()
+        val intentType = SpecialUrlDetector.UrlType.NonHttpAppLink("query", mock(), "fallback")
 
         testee.nonHttpAppLinkClicked(intentType)
         verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
@@ -3177,7 +3182,7 @@ class BrowserTabViewModelTest {
 
         testee.onViewVisible()
 
-        advanceTimeBy(3_600_000)
+        advanceTimeBy(3_600_001)
         verify(mockDismissedCtaDao).insert(DismissedCta(CtaId.DAX_FIRE_BUTTON))
         verify(mockDismissedCtaDao).insert(DismissedCta(CtaId.DAX_FIRE_BUTTON_PULSE))
     }
@@ -3252,6 +3257,26 @@ class BrowserTabViewModelTest {
     }
 
     @Test
+    fun whenConsumeAliasAndCopyToClipboardThenSetNewLastUsedDateCalled() {
+        whenever(mockEmailManager.getAlias()).thenReturn("alias")
+
+        testee.consumeAliasAndCopyToClipboard()
+
+        verify(mockEmailManager).setNewLastUsedDate()
+    }
+
+    @Test
+    fun whenConsumeAliasAndCopyToClipboardThenPixelSent() {
+        whenever(mockEmailManager.getAlias()).thenReturn("alias")
+        whenever(mockEmailManager.getCohort()).thenReturn("cohort")
+        whenever(mockEmailManager.getLastUsedDate()).thenReturn("2021-01-01")
+
+        testee.consumeAlias()
+
+        verify(mockPixel).enqueueFire(AppPixelName.EMAIL_USE_ALIAS, mapOf(Pixel.PixelParameter.COHORT to "cohort", Pixel.PixelParameter.LAST_USED_DAY to "2021-01-01"))
+    }
+
+    @Test
     fun whenEmailIsSignedOutThenIsEmailSignedInReturnsFalse() = coroutineRule.runBlocking {
         emailStateFlow.emit(false)
 
@@ -3280,10 +3305,20 @@ class BrowserTabViewModelTest {
     fun whenConsumeAliasThenPixelSent() {
         whenever(mockEmailManager.getAlias()).thenReturn("alias")
         whenever(mockEmailManager.getCohort()).thenReturn("cohort")
+        whenever(mockEmailManager.getLastUsedDate()).thenReturn("2021-01-01")
 
         testee.consumeAlias()
 
-        verify(mockPixel).enqueueFire(AppPixelName.EMAIL_USE_ALIAS, mapOf(Pixel.PixelParameter.COHORT to "cohort"))
+        verify(mockPixel).enqueueFire(AppPixelName.EMAIL_USE_ALIAS, mapOf(Pixel.PixelParameter.COHORT to "cohort", Pixel.PixelParameter.LAST_USED_DAY to "2021-01-01"))
+    }
+
+    @Test
+    fun whenConsumeAliasThenSetNewLastUsedDateCalled() {
+        whenever(mockEmailManager.getAlias()).thenReturn("alias")
+
+        testee.consumeAlias()
+
+        verify(mockEmailManager).setNewLastUsedDate()
     }
 
     @Test
@@ -3311,10 +3346,20 @@ class BrowserTabViewModelTest {
     fun whenUseAddressThenPixelSent() {
         whenever(mockEmailManager.getEmailAddress()).thenReturn("address")
         whenever(mockEmailManager.getCohort()).thenReturn("cohort")
+        whenever(mockEmailManager.getLastUsedDate()).thenReturn("2021-01-01")
 
         testee.useAddress()
 
-        verify(mockPixel).enqueueFire(AppPixelName.EMAIL_USE_ADDRESS, mapOf(Pixel.PixelParameter.COHORT to "cohort"))
+        verify(mockPixel).enqueueFire(AppPixelName.EMAIL_USE_ADDRESS, mapOf(Pixel.PixelParameter.COHORT to "cohort", Pixel.PixelParameter.LAST_USED_DAY to "2021-01-01"))
+    }
+
+    @Test
+    fun whenUseAddressThenSetNewLastUsedDateCalled() {
+        whenever(mockEmailManager.getEmailAddress()).thenReturn("address")
+
+        testee.useAddress()
+
+        verify(mockEmailManager).setNewLastUsedDate()
     }
 
     @Test
@@ -3338,35 +3383,64 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenHandleAppLinkCalledThenHandleAppLink() {
+    fun whenHandleAppLinkCalledAndShowAppLinksPromptIsTrueThenShowAppLinkPromptAndUserQueryStateSetToFalse() {
         val urlType = SpecialUrlDetector.UrlType.AppLink(uriString = "http://example.com")
-        testee.handleAppLink(urlType, isRedirect = false, isForMainFrame = true)
-        verify(mockAppLinksHandler).handleAppLink(isRedirect = eq(false), isForMainFrame = eq(true), capture(appLinkCaptor))
+        testee.handleAppLink(urlType, isForMainFrame = true)
+        whenever(mockAppLinksHandler.isUserQuery()).thenReturn(false)
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(true)
+        verify(mockAppLinksHandler).handleAppLink(eq(true), eq("http://example.com"), eq(false), eq(true), capture(appLinkCaptor))
         appLinkCaptor.value.invoke()
-        assertCommandIssued<Command.HandleAppLink>()
+        assertCommandIssued<Command.ShowAppLinkPrompt>()
+        verify(mockAppLinksHandler).setUserQueryState(false)
+    }
+
+    @Test
+    fun whenHandleAppLinkCalledAndIsUserQueryThenShowAppLinkPromptAndUserQueryStateSetToFalse() {
+        val urlType = SpecialUrlDetector.UrlType.AppLink(uriString = "http://example.com")
+        testee.handleAppLink(urlType, isForMainFrame = true)
+        whenever(mockAppLinksHandler.isUserQuery()).thenReturn(true)
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(false)
+        verify(mockAppLinksHandler).handleAppLink(eq(true), eq("http://example.com"), eq(false), eq(true), capture(appLinkCaptor))
+        appLinkCaptor.value.invoke()
+        assertCommandIssued<Command.ShowAppLinkPrompt>()
+        verify(mockAppLinksHandler).setUserQueryState(false)
+    }
+
+    @Test
+    fun whenHandleAppLinkCalledAndIsNotUserQueryAndShowAppLinksPromptIsFalseThenOpenAppLink() {
+        val urlType = SpecialUrlDetector.UrlType.AppLink(uriString = "http://example.com")
+        testee.handleAppLink(urlType, isForMainFrame = true)
+        whenever(mockAppLinksHandler.isUserQuery()).thenReturn(false)
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(false)
+        verify(mockAppLinksHandler).handleAppLink(eq(true), eq("http://example.com"), eq(false), eq(true), capture(appLinkCaptor))
+        appLinkCaptor.value.invoke()
+        assertCommandIssued<Command.OpenAppLink>()
     }
 
     @Test
     fun whenHandleNonHttpAppLinkCalledThenHandleNonHttpAppLink() {
         val urlType = SpecialUrlDetector.UrlType.NonHttpAppLink("market://details?id=com.example", Intent(), "http://example.com")
-        testee.handleNonHttpAppLink(urlType, false)
-        verify(mockAppLinksHandler).handleNonHttpAppLink(isRedirect = eq(false), capture(appLinkCaptor))
-        appLinkCaptor.value.invoke()
+        assertTrue(testee.handleNonHttpAppLink(urlType))
         assertCommandIssued<Command.HandleNonHttpAppLink>()
     }
 
     @Test
-    fun whenResetAppLinkStateCalledThenResetAppLinkState() {
-        testee.resetAppLinkState()
-        verify(mockAppLinksHandler).reset()
+    fun whenUserSubmittedQueryIsAppLinkAndShouldShowPromptThenOpenAppLinkInBrowserAndSetPreviousUrlToNull() {
+        whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
+        whenever(mockSpecialUrlDetector.determineType(anyString())).thenReturn(SpecialUrlDetector.UrlType.AppLink(uriString = "http://foo.com"))
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(true)
+        testee.onUserSubmittedQuery("foo")
+        verify(mockAppLinksHandler).updatePreviousUrl(null)
+        assertCommandIssued<Navigate>()
     }
 
     @Test
-    fun whenUserSubmittedQueryIsAppLinkThenOpenAppLinkInBrowser() {
+    fun whenUserSubmittedQueryIsAppLinkAndShouldNotShowPromptThenOpenAppLinkInBrowserAndSetPreviousUrl() {
         whenever(mockOmnibarConverter.convertQueryToUrl("foo", null)).thenReturn("foo.com")
         whenever(mockSpecialUrlDetector.determineType(anyString())).thenReturn(SpecialUrlDetector.UrlType.AppLink(uriString = "http://foo.com"))
+        whenever(mockSettingsStore.showAppLinksPrompt).thenReturn(false)
         testee.onUserSubmittedQuery("foo")
-        verify(mockAppLinksHandler).userEnteredBrowserState()
+        verify(mockAppLinksHandler).updatePreviousUrl("foo.com")
         assertCommandIssued<Navigate>()
     }
 
@@ -3386,24 +3460,157 @@ class BrowserTabViewModelTest {
     }
 
     @Test
-    fun whenLoadUrlAndUrlIsInTempAllowListThenIsWhitelistedIsTrue() {
-        whenever(mockTemporaryTrackingWhitelistDao.contains("example.com")).thenReturn(true)
+    fun whenLoadUrlAndUrlIsInContentBlockingExceptionsListThenIsWhitelistedIsTrue() {
+        whenever(mockContentBlocking.isAnException("example.com")).thenReturn(true)
         loadUrl("https://example.com")
         assertTrue(browserViewState().isWhitelisted)
     }
 
     @Test
-    fun whenLoadUrlAndUrlIsInTempAllowListThenPrivacyOnIsFalse() {
-        whenever(mockTemporaryTrackingWhitelistDao.contains("example.com")).thenReturn(true)
+    fun whenLoadUrlAndUrlIsInContentBlockingExceptionsListThenPrivacyOnIsFalse() {
+        whenever(mockContentBlocking.isAnException("example.com")).thenReturn(true)
         loadUrl("https://example.com")
         assertFalse(loadingViewState().privacyOn)
     }
 
     @Test
-    fun whenLoadUrlAndSiteIsInTempAllowListThenDoNotChangePrivacyGrade() {
-        whenever(mockTemporaryTrackingWhitelistDao.contains(any())).thenReturn(true)
+    fun whenLoadUrlAndSiteIsInContentBlockingExceptionsListThenDoNotChangePrivacyGrade() {
+        whenever(mockContentBlocking.isAnException(any())).thenReturn(true)
         loadUrl("https://example.com")
         assertNull(privacyGradeState().privacyGrade)
+    }
+
+    @Test
+    fun whenEditBookmarkRequestedThenRepositoryIsNotUpdated() = coroutineRule.runBlocking {
+        val url = "http://www.example.com"
+        val bookmark = Bookmark(id = 1L, title = "", url = url, parentId = 0L)
+        whenever(mockBookmarksRepository.getBookmark(url = url)).thenReturn(bookmark)
+        bookmarksListFlow.send(listOf(bookmark))
+        loadUrl(url = url, isBrowserShowing = true)
+        testee.onBookmarkMenuClicked()
+        verify(mockBookmarksRepository, never()).insert(title = anyString(), url = anyString(), parentId = anyLong())
+    }
+
+    @Test
+    fun whenEditBookmarkRequestedThenEditBookmarkPressedPixelIsFired() = coroutineRule.runBlocking {
+        val bookmark = Bookmark(id = 1L, title = "title", url = "www.example.com", parentId = 0L)
+        whenever(mockBookmarksRepository.getBookmark("www.example.com")).thenReturn(bookmark)
+        bookmarksListFlow.send(listOf(bookmark))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onBookmarkMenuClicked()
+        verify(mockPixel).fire(AppPixelName.MENU_ACTION_EDIT_BOOKMARK_PRESSED.pixelName)
+    }
+
+    @Test
+    fun whenEditBookmarkRequestedThenEditDialogIsShownWithCorrectUrlAndTitle() = coroutineRule.runBlocking {
+        val bookmark = Bookmark(id = 1L, title = "title", url = "www.example.com", parentId = 0L)
+        whenever(mockBookmarksRepository.getBookmark("www.example.com")).thenReturn(bookmark)
+        bookmarksListFlow.send(listOf(bookmark))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onBookmarkMenuClicked()
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+        assertTrue(commandCaptor.lastValue is Command.ShowEditSavedSiteDialog)
+        val command = commandCaptor.lastValue as Command.ShowEditSavedSiteDialog
+        assertEquals("www.example.com", command.savedSite.url)
+        assertEquals("title", command.savedSite.title)
+    }
+
+    @Test
+    fun whenRemoveFavoriteRequestedThenDaoInsertIsNotCalled() = coroutineRule.runBlocking {
+        val favoriteSite = Favorite(id = 1L, title = "", url = "www.example.com", position = 0)
+        favoriteListFlow.send(listOf(favoriteSite))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onFavoriteMenuClicked()
+        verify(mockFavoritesRepository, never()).insert(any())
+    }
+
+    @Test
+    fun whenRemoveFavoriteRequestedThenRemoveFavoritePressedPixelIsFired() = coroutineRule.runBlocking {
+        val favoriteSite = Favorite(id = 1L, title = "", url = "www.example.com", position = 0)
+        whenever(mockFavoritesRepository.favorite("www.example.com")).thenReturn(favoriteSite)
+        favoriteListFlow.send(listOf(favoriteSite))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onFavoriteMenuClicked()
+        verify(mockPixel).fire(
+            AppPixelName.MENU_ACTION_REMOVE_FAVORITE_PRESSED.pixelName
+        )
+    }
+
+    @Test
+    fun whenRemoveFavoriteRequestedThenRepositoryDeleteIsCalledForThatSite() = coroutineRule.runBlocking {
+        val favoriteSite = Favorite(id = 1L, title = "", url = "www.example.com", position = 0)
+        whenever(mockFavoritesRepository.favorite("www.example.com")).thenReturn(favoriteSite)
+        favoriteListFlow.send(listOf(favoriteSite))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onFavoriteMenuClicked()
+        verify(mockFavoritesRepository, atLeastOnce()).delete(favoriteSite)
+    }
+
+    @Test
+    fun whenRemoveFavoriteRequestedThenDeleteConfirmationDialogIsShownWithCorrectUrlAndTitle() = coroutineRule.runBlocking {
+        val favoriteSite = Favorite(id = 1L, title = "title", url = "www.example.com", position = 0)
+        whenever(mockFavoritesRepository.favorite("www.example.com")).thenReturn(favoriteSite)
+        favoriteListFlow.send(listOf(favoriteSite))
+        loadUrl("www.example.com", isBrowserShowing = true)
+        testee.onFavoriteMenuClicked()
+        verify(mockCommandObserver, atLeastOnce()).onChanged(commandCaptor.capture())
+        assertTrue(commandCaptor.lastValue is Command.DeleteSavedSiteConfirmation)
+        val command = commandCaptor.lastValue as Command.DeleteSavedSiteConfirmation
+        assertEquals("www.example.com", command.savedSite.url)
+        assertEquals("title", command.savedSite.title)
+    }
+
+    @Test
+    fun whenPageChangedThenUpdatePreviousUrlAndUserQueryStateSetToFalse() {
+        loadUrl(url = "www.example.com", isBrowserShowing = true)
+        verify(mockAppLinksHandler).updatePreviousUrl("www.example.com")
+        verify(mockAppLinksHandler).setUserQueryState(false)
+    }
+
+    @Test
+    fun whenPageChangedAndIsAppLinkThenUpdatePreviousAppLink() {
+        val appLink = SpecialUrlDetector.UrlType.AppLink(uriString = "www.example.com")
+        whenever(mockSpecialUrlDetector.determineType(anyString())).thenReturn(appLink)
+        loadUrl(url = "www.example.com", isBrowserShowing = true)
+        assertEquals(appLink, browserViewState().previousAppLink)
+    }
+
+    @Test
+    fun whenPageChangedAndIsNotAppLinkThenSetPreviousAppLinkToNull() {
+        whenever(mockSpecialUrlDetector.determineType(anyString())).thenReturn(SpecialUrlDetector.UrlType.Web("www.example.com"))
+        loadUrl(url = "www.example.com", isBrowserShowing = true)
+        assertNull(browserViewState().previousAppLink)
+    }
+
+    @Test
+    fun whenOpenAppLinkThenOpenPreviousAppLink() {
+        testee.browserViewState.value = browserViewState().copy(previousAppLink = SpecialUrlDetector.UrlType.AppLink(uriString = "example.com"))
+        testee.openAppLink()
+        assertCommandIssued<Command.OpenAppLink>()
+    }
+
+    @Test
+    fun whenOpenAppLinkAndPreviousAppLinkIsNullThenDoNotOpenAppLink() {
+        testee.openAppLink()
+        assertCommandNotIssued<Command.OpenAppLink>()
+    }
+
+    private fun givenUrlCanUseGpc() {
+        whenever(mockFeatureToggle.isFeatureEnabled(any(), any())).thenReturn(true)
+        whenever(mockGpcRepository.isGpcEnabled()).thenReturn(true)
+        whenever(mockGpcRepository.exceptions).thenReturn(CopyOnWriteArrayList())
+    }
+
+    private fun givenUrlCannotUseGpc(url: String) {
+        val exceptions = CopyOnWriteArrayList<GpcException>().apply { add(GpcException(url)) }
+        whenever(mockFeatureToggle.isFeatureEnabled(eq(PrivacyFeatureName.GpcFeatureName()), any())).thenReturn(true)
+        whenever(mockGpcRepository.isGpcEnabled()).thenReturn(true)
+        whenever(mockGpcRepository.exceptions).thenReturn(exceptions)
+    }
+
+    private fun givenGpcIsDisabled() {
+        whenever(mockFeatureToggle.isFeatureEnabled(any(), any())).thenReturn(true)
+        whenever(mockGpcRepository.isGpcEnabled()).thenReturn(false)
     }
 
     private suspend fun givenFireButtonPulsing() {
@@ -3502,14 +3709,6 @@ class BrowserTabViewModelTest {
         siteLiveData.value = site
         whenever(mockTabRepository.retrieveSiteData("TAB_ID")).thenReturn(siteLiveData)
         testee.loadData("TAB_ID", domain, false, false)
-    }
-
-    private fun givenFavoritesOnboarindExpEnabled() {
-        whenever(mockVariantManager.getVariant()).thenReturn(VariantManager.ACTIVE_VARIANTS.first { it.key == "zo" })
-    }
-
-    private fun givenDefaultOnboarding() {
-        whenever(mockVariantManager.getVariant()).thenReturn(VariantManager.DEFAULT_VARIANT)
     }
 
     private fun setBrowserShowing(isBrowsing: Boolean) {

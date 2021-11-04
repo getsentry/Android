@@ -34,12 +34,18 @@ import com.duckduckgo.app.statistics.pixels.Pixel
 import com.duckduckgo.app.statistics.pixels.Pixel.PixelName
 import com.duckduckgo.app.statistics.pixels.Pixel.PixelParameter.FIRE_ANIMATION
 import com.duckduckgo.di.scopes.AppObjectGraph
+import com.duckduckgo.feature.toggles.api.FeatureToggle
 import com.duckduckgo.mobile.android.ui.DuckDuckGoTheme
 import com.duckduckgo.mobile.android.ui.store.ThemingDataStore
+import com.duckduckgo.privacy.config.api.Gpc
+import com.duckduckgo.privacy.config.api.PrivacyFeatureName
 import com.squareup.anvil.annotations.ContributesMultibinding
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
@@ -51,13 +57,15 @@ class SettingsViewModel @Inject constructor(
     private val defaultWebBrowserCapability: DefaultBrowserDetector,
     private val variantManager: VariantManager,
     private val fireAnimationLoader: FireAnimationLoader,
+    private val gpc: Gpc,
+    private val featureToggle: FeatureToggle,
     private val pixel: Pixel
 ) : ViewModel() {
 
     data class ViewState(
         val loading: Boolean = true,
         val version: String = "",
-        val lightThemeEnabled: Boolean = false,
+        val theme: DuckDuckGoTheme = DuckDuckGoTheme.LIGHT,
         val autoCompleteSuggestionsEnabled: Boolean = true,
         val showDefaultBrowserSetting: Boolean = false,
         val isAppDefaultBrowser: Boolean = false,
@@ -65,7 +73,7 @@ class SettingsViewModel @Inject constructor(
         val automaticallyClearData: AutomaticallyClearData = AutomaticallyClearData(ClearWhatOption.CLEAR_NONE, ClearWhenOption.APP_EXIT_ONLY),
         val appIcon: AppIcon = AppIcon.DEFAULT,
         val globalPrivacyControlEnabled: Boolean = false,
-        val appLinksEnabled: Boolean = true
+        val appLinksSettingType: AppLinkSettingType = AppLinkSettingType.ASK_EVERYTIME
     )
 
     data class AutomaticallyClearData(
@@ -83,6 +91,8 @@ class SettingsViewModel @Inject constructor(
         object LaunchWhitelist : Command()
         object LaunchAppIcon : Command()
         data class LaunchFireAnimationSettings(val animation: FireAnimation) : Command()
+        data class LaunchThemeSettings(val theme: DuckDuckGoTheme) : Command()
+        data class LaunchAppLinkSettings(val appLinksSettingType: AppLinkSettingType) : Command()
         object LaunchGlobalPrivacyControl : Command()
         object UpdateTheme : Command()
         data class ShowClearWhatDialog(val option: ClearWhatOption) : Command()
@@ -100,7 +110,7 @@ class SettingsViewModel @Inject constructor(
     fun start() {
         val defaultBrowserAlready = defaultWebBrowserCapability.isDefaultBrowser()
         val variant = variantManager.getVariant()
-        val isLightTheme = themingDataStore.theme == DuckDuckGoTheme.LIGHT
+        val savedTheme = themingDataStore.theme
         val automaticallyClearWhat = settingsDataStore.automaticallyClearWhatOption
         val automaticallyClearWhen = settingsDataStore.automaticallyClearWhenOption
         val automaticallyClearWhenEnabled = isAutomaticallyClearingDataWhenSettingEnabled(automaticallyClearWhat)
@@ -109,7 +119,7 @@ class SettingsViewModel @Inject constructor(
             viewState.emit(
                 currentViewState().copy(
                     loading = false,
-                    lightThemeEnabled = isLightTheme,
+                    theme = savedTheme,
                     autoCompleteSuggestionsEnabled = settingsDataStore.autoCompleteSuggestionsEnabled,
                     isAppDefaultBrowser = defaultBrowserAlready,
                     showDefaultBrowserSetting = defaultWebBrowserCapability.deviceSupportsDefaultBrowserConfiguration(),
@@ -117,8 +127,8 @@ class SettingsViewModel @Inject constructor(
                     automaticallyClearData = AutomaticallyClearData(automaticallyClearWhat, automaticallyClearWhen, automaticallyClearWhenEnabled),
                     appIcon = settingsDataStore.appIcon,
                     selectedFireAnimation = settingsDataStore.selectedFireAnimation,
-                    globalPrivacyControlEnabled = settingsDataStore.globalPrivacyControlEnabled,
-                    appLinksEnabled = settingsDataStore.appLinksEnabled
+                    globalPrivacyControlEnabled = gpc.isEnabled() && featureToggle.isFeatureEnabled(PrivacyFeatureName.GpcFeatureName()) == true,
+                    appLinksSettingType = getAppLinksSettingsState(settingsDataStore.appLinksEnabled, settingsDataStore.showAppLinksPrompt)
                 )
             )
         }
@@ -143,6 +153,15 @@ class SettingsViewModel @Inject constructor(
     fun userRequestedToChangeFireAnimation() {
         viewModelScope.launch { command.send(Command.LaunchFireAnimationSettings(viewState.value.selectedFireAnimation)) }
         pixel.fire(FIRE_ANIMATION_SETTINGS_OPENED)
+    }
+
+    fun userRequestedToChangeTheme() {
+        viewModelScope.launch { command.send(Command.LaunchThemeSettings(viewState.value.theme)) }
+        pixel.fire(SETTINGS_THEME_OPENED)
+    }
+
+    fun userRequestedToChangeAppLinkSetting() {
+        viewModelScope.launch { command.send(Command.LaunchAppLinkSettings(viewState.value.appLinksSettingType)) }
     }
 
     fun onFireproofWebsitesClicked() {
@@ -179,31 +198,42 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun onLightThemeToggled(enabled: Boolean) {
-        Timber.i("User toggled light theme, is now enabled: $enabled")
-        val lightThemeSelected = themingDataStore.theme == DuckDuckGoTheme.LIGHT
-        if (enabled && lightThemeSelected) return
-        themingDataStore.theme = if (enabled) DuckDuckGoTheme.LIGHT else DuckDuckGoTheme.DARK
-        viewModelScope.launch {
-            viewState.emit(currentViewState().copy(lightThemeEnabled = enabled))
-            command.send(Command.UpdateTheme)
-        }
-
-        val pixelName =
-            if (enabled) SETTINGS_THEME_TOGGLED_LIGHT else SETTINGS_THEME_TOGGLED_DARK
-        pixel.fire(pixelName)
-    }
-
     fun onAutocompleteSettingChanged(enabled: Boolean) {
         Timber.i("User changed autocomplete setting, is now enabled: $enabled")
         settingsDataStore.autoCompleteSuggestionsEnabled = enabled
         viewModelScope.launch { viewState.emit(currentViewState().copy(autoCompleteSuggestionsEnabled = enabled)) }
     }
 
-    fun onAppLinksSettingChanged(enabled: Boolean) {
-        Timber.i("User changed app links setting, is now enabled: $enabled")
-        settingsDataStore.appLinksEnabled = enabled
-        viewModelScope.launch { viewState.emit(currentViewState().copy(appLinksEnabled = enabled)) }
+    fun onAppLinksSettingChanged(appLinkSettingType: AppLinkSettingType) {
+        Timber.i("User changed app links setting, is now: ${appLinkSettingType.name}")
+
+        when (appLinkSettingType) {
+            AppLinkSettingType.ASK_EVERYTIME -> {
+                settingsDataStore.appLinksEnabled = true
+                settingsDataStore.showAppLinksPrompt = true
+            }
+            AppLinkSettingType.ALWAYS -> {
+                settingsDataStore.appLinksEnabled = true
+                settingsDataStore.showAppLinksPrompt = false
+            }
+            AppLinkSettingType.NEVER -> {
+                settingsDataStore.appLinksEnabled = false
+                settingsDataStore.showAppLinksPrompt = false
+            }
+        }
+        viewModelScope.launch { viewState.emit(currentViewState().copy(appLinksSettingType = appLinkSettingType)) }
+    }
+
+    private fun getAppLinksSettingsState(appLinksEnabled: Boolean, showAppLinksPrompt: Boolean): AppLinkSettingType {
+        return if (appLinksEnabled) {
+            if (showAppLinksPrompt) {
+                AppLinkSettingType.ASK_EVERYTIME
+            } else {
+                AppLinkSettingType.ALWAYS
+            }
+        } else {
+            AppLinkSettingType.NEVER
+        }
     }
 
     private fun obtainVersion(variantKey: String): String {
@@ -261,6 +291,27 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun onThemeSelected(selectedTheme: DuckDuckGoTheme) {
+        Timber.d("User toggled theme, theme to set: $selectedTheme")
+        if (themingDataStore.isCurrentlySelected(selectedTheme)) {
+            Timber.d("User selected same theme they've already set: $selectedTheme; no need to do anything else")
+            return
+        }
+        themingDataStore.theme = selectedTheme
+        viewModelScope.launch {
+            viewState.emit(currentViewState().copy(theme = selectedTheme))
+            command.send(Command.UpdateTheme)
+        }
+
+        val pixelName =
+            when (selectedTheme) {
+                DuckDuckGoTheme.LIGHT -> SETTINGS_THEME_TOGGLED_LIGHT
+                DuckDuckGoTheme.DARK -> SETTINGS_THEME_TOGGLED_DARK
+                DuckDuckGoTheme.SYSTEM_DEFAULT -> SETTINGS_THEME_TOGGLED_SYSTEM_DEFAULT
+            }
+        pixel.fire(pixelName)
+    }
+
     fun onFireAnimationSelected(selectedFireAnimation: FireAnimation) {
         if (settingsDataStore.isCurrentlySelected(selectedFireAnimation)) {
             Timber.v("User selected same thing they already have set: $selectedFireAnimation; no need to do anything else")
@@ -303,6 +354,12 @@ class SettingsViewModel @Inject constructor(
     }
 }
 
+enum class AppLinkSettingType {
+    ASK_EVERYTIME,
+    ALWAYS,
+    NEVER
+}
+
 @ContributesMultibinding(AppObjectGraph::class)
 class SettingsViewModelFactory @Inject constructor(
     private val themingDataStore: Provider<ThemingDataStore>,
@@ -310,12 +367,14 @@ class SettingsViewModelFactory @Inject constructor(
     private val defaultWebBrowserCapability: Provider<DefaultBrowserDetector>,
     private val variantManager: Provider<VariantManager>,
     private val fireAnimationLoader: Provider<FireAnimationLoader>,
+    private val gpc: Provider<Gpc>,
+    private val featureToggle: Provider<FeatureToggle>,
     private val pixel: Provider<Pixel>
 ) : ViewModelFactoryPlugin {
     override fun <T : ViewModel?> create(modelClass: Class<T>): T? {
         with(modelClass) {
             return when {
-                isAssignableFrom(SettingsViewModel::class.java) -> (SettingsViewModel(themingDataStore.get(), settingsDataStore.get(), defaultWebBrowserCapability.get(), variantManager.get(), fireAnimationLoader.get(), pixel.get()) as T)
+                isAssignableFrom(SettingsViewModel::class.java) -> (SettingsViewModel(themingDataStore.get(), settingsDataStore.get(), defaultWebBrowserCapability.get(), variantManager.get(), fireAnimationLoader.get(), gpc.get(), featureToggle.get(), pixel.get()) as T)
                 else -> null
             }
         }

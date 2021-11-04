@@ -73,6 +73,7 @@ interface Pixel {
         const val FIRE_EXECUTED = "fe"
         const val BOOKMARK_COUNT = "bco"
         const val COHORT = "cohort"
+        const val LAST_USED_DAY = "duck_address_last_used"
     }
 
     object PixelValues {
@@ -82,8 +83,6 @@ interface Pixel {
         const val DEFAULT_BROWSER_JUST_ONCE_MAX = "jom"
         const val DEFAULT_BROWSER_EXTERNAL = "e"
         const val DAX_INITIAL_CTA = "i"
-        const val DAX_FAVORITES_CLEAR_CTA = "fvc"
-        const val DAX_FAVORITES_NEWTAB_CTA = "fvn"
         const val DAX_END_CTA = "e"
         const val DAX_SERP_CTA = "s"
         const val DAX_NETWORK_CTA_1 = "n"

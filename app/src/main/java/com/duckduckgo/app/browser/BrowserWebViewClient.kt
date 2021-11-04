@@ -38,8 +38,8 @@ import com.duckduckgo.app.email.EmailInjector
 import com.duckduckgo.app.global.DispatcherProvider
 import com.duckduckgo.app.global.exception.UncaughtExceptionRepository
 import com.duckduckgo.app.global.exception.UncaughtExceptionSource.*
-import com.duckduckgo.app.globalprivacycontrol.GlobalPrivacyControl
 import com.duckduckgo.app.statistics.store.OfflinePixelCountDataStore
+import com.duckduckgo.privacy.config.api.Gpc
 import kotlinx.coroutines.*
 import timber.log.Timber
 import java.net.URI
@@ -55,7 +55,7 @@ class BrowserWebViewClient(
     private val cookieManager: CookieManager,
     private val loginDetector: DOMLoginDetector,
     private val dosDetector: DosDetector,
-    private val globalPrivacyControl: GlobalPrivacyControl,
+    private val gpc: Gpc,
     private val thirdPartyCookieManager: ThirdPartyCookieManager,
     private val appCoroutineScope: CoroutineScope,
     private val dispatcherProvider: DispatcherProvider,
@@ -71,7 +71,7 @@ class BrowserWebViewClient(
     @RequiresApi(Build.VERSION_CODES.N)
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url
-        return shouldOverride(view, url, request.isForMainFrame, request.isRedirect)
+        return shouldOverride(view, url, request.isForMainFrame)
     }
 
     /**
@@ -80,13 +80,13 @@ class BrowserWebViewClient(
     @Suppress("OverridingDeprecatedMember")
     override fun shouldOverrideUrlLoading(view: WebView, urlString: String): Boolean {
         val url = Uri.parse(urlString)
-        return shouldOverride(view, url, isForMainFrame = true, isRedirect = false)
+        return shouldOverride(view, url, isForMainFrame = true)
     }
 
     /**
      * API-agnostic implementation of deciding whether to override url or not
      */
-    private fun shouldOverride(webView: WebView, url: Uri, isForMainFrame: Boolean, isRedirect: Boolean): Boolean {
+    private fun shouldOverride(webView: WebView, url: Uri, isForMainFrame: Boolean): Boolean {
 
         Timber.v("shouldOverride $url")
         try {
@@ -112,14 +112,14 @@ class BrowserWebViewClient(
                 is SpecialUrlDetector.UrlType.AppLink -> {
                     Timber.i("Found app link for ${urlType.uriString}")
                     webViewClientListener?.let { listener ->
-                        return listener.handleAppLink(urlType, isRedirect, isForMainFrame)
+                        return listener.handleAppLink(urlType, isForMainFrame)
                     }
                     false
                 }
                 is SpecialUrlDetector.UrlType.NonHttpAppLink -> {
                     Timber.i("Found non-http app link for ${urlType.uriString}")
                     webViewClientListener?.let { listener ->
-                        return listener.handleNonHttpAppLink(urlType, isRedirect)
+                        return listener.handleNonHttpAppLink(urlType)
                     }
                     true
                 }
@@ -168,9 +168,8 @@ class BrowserWebViewClient(
             }
             lastPageStarted = url
             emailInjector.injectEmailAutofillJs(webView, url) // Needs to be injected onPageStarted
-            globalPrivacyControl.injectDoNotSellToDom(webView)
+            injectGpcToDom(webView, url)
             loginDetector.onEvent(WebNavigationEvent.OnPageStarted(webView))
-            webViewClientListener?.resetAppLinkState()
         } catch (e: Throwable) {
             appCoroutineScope.launch {
                 uncaughtExceptionRepository.recordUncaughtException(e, ON_PAGE_STARTED)
@@ -193,6 +192,14 @@ class BrowserWebViewClient(
             appCoroutineScope.launch {
                 uncaughtExceptionRepository.recordUncaughtException(e, ON_PAGE_FINISHED)
                 throw e
+            }
+        }
+    }
+
+    private fun injectGpcToDom(webView: WebView, url: String?) {
+        url?.let {
+            if (gpc.canGpcBeUsedByUrl(url)) {
+                webView.evaluateJavascript("javascript:${gpc.getGpcJs()}", null)
             }
         }
     }
